@@ -3,24 +3,26 @@
 
 #include <WString.h>
 
+typedef struct _command{
+  char type;
+  unsigned int value;
+}*Command;
+
 class serialComm {
 
 public:
 
-  serialComm(int baudrate);
+  serialComm();
   int getHaveCommand();
-  char getCommandType();
-  int getCommandValue();
+  Command getCommand();
   void eventHandler();
-  //void iterate();
+  void iterate();
 
 private:
   String inputBuffer;
   int haveCommand;
-  char commandType;
-  int commandValue;
-
-  void processString();
+  Command currentCommand;
+  int bufferLength;
 };
 
 #endif

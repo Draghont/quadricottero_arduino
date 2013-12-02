@@ -4,16 +4,19 @@
  Il circuito prevede che i pin 2 3 e 4 siano collegati ai 
  pin di comando dei buffer gate il cui input e' il segnale pwm generato dal timer.
  I 3 gate vanno connessi ai mosfet nella parte superiore.
- I pin 4,5 e 6 devono essere invece collegati direttamente ai mosfet della parte inferiore.
+ I pin 5,6 e 7 devono essere invece collegati direttamente ai mosfet della parte inferiore.
  
  
  */
 #include <Arduino.h>
 #include "brushless.h"
 
-#define TIMER_CLOCK_FREQ 16000000.0
-#define NUM_STATES 6
+#ifndef F_CPU
+#define F_CPU 8000000.0
+#endif
 
+#define NUM_STATES 6
+//#define DEBUG
 
 byte states[NUM_STATES] = {
   B01000100,
@@ -23,93 +26,240 @@ byte states[NUM_STATES] = {
   B00110000,
   B01010000};
 
+brushless::brushless(){
 
-volatile unsigned int cpmCounter=0;
-volatile int stato = 0;
+  //  Serial.print("Entering constructor for: ");
+  //  Serial.println(__FUNCTION__);
 
-volatile int frequency;
-volatile int refreshRate;
-volatile int duty;
+  DDRD       |= B11111100;  // set pin [2,7] as output
+  PORTD       = states[0];  // set up first state on pins 2,6
 
-
-brushless::brushless(int timeoutFrequency){
-
-  DDRD |= B01111100;  // set pin [2,6] as output
-  PORTD = states[0];  // set up first state on pins 2,6
-
-  timer1_init(timeoutFrequency);
-
-  frequency   = 875;
-  duty        = 64;
+  frequency   = 800;
+  duty        = 50;
   refreshRate = 100;
 
+  cpmCounter  = 0;
+  stato       = 0;
+
+  timer1_init();
+
+}
+
+int brushless::timer1_init(){
+
+  pinMode(10,OUTPUT);
+  /*
+    Prescaler is configged like this:
+   
+   (1 << CS10): divide by 1, 64, 1024
+   (1 << WGM13): 16 bit Phase+Frequency correct, TOP =ICR1
+   (1 << COM1B1): non-inverting, and inverting?????
+   */
+
+  TCCR1B = (1 << CS10) | (1 << WGM13);
+  TCCR1A = (1 << COM1B1);
+
+  TIMSK1 = _BV(OCIE1B);  //signal handler association
+
+  ICR1   = frequency;
+  setDuty(duty); 
+}
+
+//MODIFICA 01/12
+start_values brushless::startupcalc(int temp, int MIN, float dec, float resto, int slow)
+{ 
+  start_values ritorno;
+  int delta= temp - MIN;
+  float minus = delta * dec;
+  if (minus >= 1)
+  {
+    temp = temp - floor (minus);
+  }
+  else
+  {
+    if (slow == 1)
+    {
+      resto = resto + minus;
+      if (resto >=1)
+      {
+        temp = temp -floor (resto);
+        resto = resto - floor (resto);
+      }
+
+    }
+    else if ( slow == 0 )
+    {
+      temp = temp-1;
+    }
+
+  }
+  ritorno.temp=temp;
+  ritorno.resto= resto;
+  return ritorno;
+}
+int brushless::startup(int verbose){ 
+  Serial.println("Init. startup");
+
+  int MAX_f = 900;
+  int MIN_f = 320;
+  float dec_f = 0.1;
+  start_values ritorno_f;
+  ritorno_f.temp=MAX_f;
+  ritorno_f.resto=0;
+
+  int MAX_d = 90;
+  int MIN_d = 65;
+  float dec_d = 0.1;
+  start_values ritorno_d;
+  ritorno_d.temp=MAX_d;
+  ritorno_d.resto=0;
+
+  int MAX_r = 120;
+  int MIN_r = 30;
+  float dec_r = 0.1;
+  start_values ritorno_r;
+  ritorno_r.temp=MAX_r;
+  ritorno_r.resto=0;
+
+  int  delta_f;
+  int  delta_d;
+  int  delta_r;
+  float minus_f;
+  float minus_d;
+  float minus_r;
+
+  while ((ritorno_f.temp > MIN_f) || (ritorno_d.temp > MIN_d)||(ritorno_r.temp > MIN_r))
+  {
+
+    if (ritorno_f.temp > MIN_f)
+    {
+      ritorno_f = this -> startupcalc(ritorno_f.temp, MIN_f, dec_f , ritorno_f.resto, 1);
+      ICR1 = ritorno_f.temp;
+      setDuty(ritorno_d.temp);
+    }
+
+    if (ritorno_d.temp > MIN_d )
+    {
+      ritorno_d = this -> startupcalc(ritorno_d.temp, MIN_d, dec_d, ritorno_d.resto, 1);
+      setDuty(ritorno_d.temp);
+    }
+
+    if (ritorno_r.temp > MIN_r )
+    {
+      ritorno_r = this -> startupcalc(ritorno_r.temp, MIN_r, dec_r, ritorno_r.resto, 1);
+      setRefreshRate(ritorno_r.temp);
+    }
+    if (verbose == 1)  
+    {
+      Serial.print(ritorno_f.temp );
+      Serial.print(",");
+      Serial.print(ritorno_d.temp );
+      Serial.print(",");
+      Serial.println(ritorno_r.temp );
+    }
+    delay(100);
+  }
+  //FINE MODIFICA funzioni startup 01/12 
+
+  Serial.println("End startup");
 }
 
 int brushless::getFrequency(){ 
-  return frequency;
+  return ICR1;//MODIFICA 01/12
 }
+
 int brushless::getDuty(){ 
-  return duty;
+  int duty = OCR1B;//MODIFICA 01/12
+  int freq = ICR1;
+  float perc = ((float)duty / (float)freq)*100;
+  return perc;//MODIFICA 01/12
 }
 int brushless::getRefreshRate(){ 
   return refreshRate;
 }
 
-void brushless::setFrequency(int val){
+int brushless::setFrequency(int val){
   /*
-  in questo punto sarebbe bello determinare un range di 
+   in questo punto sarebbe bello determinare un range di 
    valori utili e mapparlo su una scala di valori semplici tipo 0 - 100
    
    per ora passiamo tutto
    */
 
-  ICR1 = val;
-  frequency = val;  
+
+  int diff = val - frequency;
+
+  //    Serial.print(__FUNCTION__);
+  //    Serial.print(" :diff is:");
+  //    Serial.println(diff);
+
+  if(diff == 0){
+    Serial.print("setFrequency exit: same value ");
+    Serial.println(frequency);
+    return frequency;
+  }
+  if(diff > 0){
+    for(int i=0;i<diff;i++){
+      ICR1      = ++frequency;
+      setDuty(duty);
+      //    Serial.println(frequency);
+    }  
+  }
+  if(diff < 0){
+    for(int i=diff;i<0;i++){
+      ICR1      = --frequency;
+      setDuty(duty);
+      //    Serial.println(frequency);
+    }  
+  }
+
+  //ICR1      = val;
+  //frequency = val;
+
+  //setDuty(duty);
+  return ICR1;
 }
 
-void brushless::setDuty(int val){
+int brushless::setDuty(int val){
 
-  if(val < 0 || val > 255) return;
-
-  OCR1B = val;
-  duty  = val;
+  if(val < 0 || val >= 100) return -1;
+  duty  = map(val,0,100,0,ICR1);
+  OCR1B = duty; 
+  return duty;
 }
 
-void brushless::setRefreshRate(int val){
+int brushless::setRefreshRate(int val){
 
   /*
   necessaria un analisi sperimentale di questo valore
    */
 
-  refreshRate = val;
+
+  int diff = val - refreshRate;
+
+  if(diff == 0){
+    Serial.print("setRefreshRate exit: same value ");
+    Serial.println(refreshRate);
+    return 0;
+  }
+
+  if(diff > 0){
+    for(int i=0;i<diff;i++){
+      refreshRate = ++refreshRate;
+      //      Serial.println(refreshRate);
+    }  
+  }
+  if(diff < 0){
+    for(int i=diff;i<0;i++){
+      refreshRate = --refreshRate;
+      //      Serial.println(refreshRate);
+    }  
+  }
+  return 0;
 }
 
 
-void brushless::timer1_init(int timeoutFrequency){
-
-  pinMode(10,OUTPUT);
-
-  unsigned char result=(int)((257.0-(TIMER_CLOCK_FREQ/timeoutFrequency))+0.5); //the 0.5 is for rounding;
-
-  ICR1   = 875;  // range: 1023 (7.8 KHz) 65 (123 KHz)    il max dovrebbe essere 65536
-
-  TCCR1A = 0;    // Just clear register. 
-
-  TCCR1B = _BV(WGM13) | _BV(CS10); // phase and freq correct mode and define no prescaler. 
-
-  // OC1A,B HI when COUNT = OCR1A,B upcounting, LO when COUNT = OCR1A,B downcounting. 
-  TCCR1A = _BV(COM1A1) | _BV(COM1A0)| _BV(COM1B1)| _BV(COM1B0); 
-
-  TIMSK1 = _BV(OCIE1B);//signal handler association
-
-  //load the timer for its first cycle
-  TCNT1  = result; 
-
-  OCR1B  = 64; //range 0-255 
-}
-
-
-ISR(TIMER1_COMPB_vect) {
+int brushless::eventHandler(){
 
   cpmCounter++;
 
@@ -118,9 +268,15 @@ ISR(TIMER1_COMPB_vect) {
     // iterazione attraverso gli stati dell'automa
     stato      = ++stato % NUM_STATES;
     PORTD      = states[stato];
-    
-    cpmCounter = 0;
-  
+
+    cpmCounter = 0;  
   }
 }
+
+
+
+
+
+
+
 
